@@ -632,24 +632,23 @@ function configure_package() {
         sdkparam=$(xcodebuild -showsdks | awk '/^$/{p=0};p;/macOS SDKs/{p=1}' | tail -1 | cut -f3);
         sdkpath=$(`echo xcodebuild $sdkparam -version Path`)
 
-        log $sdkparam
-        log $sdkpath
+        configure_option -R "--with-libdir" "${sdkpath}/usr/"
 
         # if keg-only package
-        if [[ $(brew info libedit | grep keg-only) -eq 0 ]]; then
-          configure_option -R "--with-libedit" "$(sdkpath)/usr/"
+        if [[ $(brew info libedit | grep -q keg-only) -eq 0 ]]; then
+          configure_option -R "--with-libedit" "${sdkpath}/usr/"
         fi;
 
-        if [[ $(brew info libiconv | grep keg-only) -eq 0 ]]; then
-          configure_option -R "--with-iconv" "$(sdkpath)/usr/"
+        if [[ $(brew info libiconv | grep -q keg-only) -eq 0 ]]; then
+          configure_option -R "--with-iconv=" "${sdkpath}/usr/"
         fi;
 
-        if [[ $(brew info bzip2 | grep keg-only) -eq 0 ]]; then
-          configure_option -R "--with-bz2" "$(sdkpath)/usr/"
+        if [[ $(brew info bzip2 | grep -q keg-only) -eq 0 ]]; then
+          configure_option -R "--with-bz2" "${sdkpath}/usr/"
         fi;
 
-        if [[ $(brew info zlib | grep keg-only) -eq 0 ]]; then
-          configure_option -R "--with-zlib-dir" "$(sdkpath)/usr/"
+        if [[ $(brew info zlib | grep -q keg-only) -eq 0 ]]; then
+          configure_option -R "--with-zlib-dir" "${sdkpath}/usr/"
         fi;
     fi;
 
