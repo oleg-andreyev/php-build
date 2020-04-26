@@ -349,6 +349,22 @@ function load_plugins() {
     done
 }
 
+function dynamic_patch() {
+    export PHP_BUILD_ROOT
+    export PREFIX
+    export SOURCE_PATH="$1"
+
+    local triggers_dir="$PHP_BUILD_ROOT/share/php-build/after-patch.d/"
+    local triggers=$(ls "$triggers_dir")
+
+    if [ -n "$triggers" ]; then
+        for trigger in "$triggers_dir"*; do
+            log "Info" "Applying patches: $(basename $trigger)"
+            source "$trigger"
+        done
+    fi
+}
+
 function build_package() {
     local source_path=$1
     local cwd="$(pwd)"
@@ -362,6 +378,8 @@ function build_package() {
     fi
 
     apply_patches "$source_path" 2>&4
+
+    dynamic_patch "$source_path" 2>&4
 
     configure_package "$source_path"
 
@@ -629,10 +647,7 @@ function configure_package() {
 
     if is_osx; then
         # find sdk path
-        sdkparam=$(xcodebuild -showsdks | awk '/^$/{p=0};p;/macOS SDKs/{p=1}' | tail -1 | cut -f3);
-        sdkpath=$(`echo xcodebuild $sdkparam -version Path`)
-
-        configure_option -R "--with-libdir" "${sdkpath}/usr/"
+        sdkpath=$(xcrun --show-sdk-path)
 
         # if keg-only package
         if [[ $(brew info libedit | grep -q keg-only) -eq 0 ]]; then
@@ -640,7 +655,7 @@ function configure_package() {
         fi;
 
         if [[ $(brew info libiconv | grep -q keg-only) -eq 0 ]]; then
-          configure_option -R "--with-iconv=" "${sdkpath}/usr/"
+          configure_option -R "--with-iconv" "${sdkpath}/usr/"
         fi;
 
         if [[ $(brew info bzip2 | grep -q keg-only) -eq 0 ]]; then
