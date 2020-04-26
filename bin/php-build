@@ -622,8 +622,33 @@ function configure_package() {
     if is_osx; then
         configure_option -D "--with-gettext"
         configure_option -D "--with-readline"
+        # this will work for MacOS < 11.13 (macOS Sierra) when libedit wasn't bundled with MacOS SDK
+        configure_option "--with-libedit"
         configure_option -R "--with-png-dir" "/usr/X11"
     fi
+
+    if is_osx; then
+        # find sdk path
+        sdkparam=$(xcodebuild -showsdks | awk '/^$/{p=0};p;/macOS SDKs/{p=1}' | tail -1 | cut -f3);
+        sdkpath=$(`echo xcodebuild $sdkparam -version Path`)
+
+        # if keg-only package
+        if [[ $(brew info libedit | grep keg-only) -eq 0 ]]; then
+          configure_option -R "--with-libedit" "$(sdkpath)/usr/"
+        fi;
+
+        if [[ $(brew info libiconv | grep keg-only) -eq 0 ]]; then
+          configure_option -R "--with-iconv" "$(sdkpath)/usr/"
+        fi;
+
+        if [[ $(brew info bzip2 | grep keg-only) -eq 0 ]]; then
+          configure_option -R "--with-bz2" "$(sdkpath)/usr/"
+        fi;
+
+        if [[ $(brew info zlib | grep keg-only) -eq 0 ]]; then
+          configure_option -R "--with-zlib-dir" "$(sdkpath)/usr/"
+        fi;
+    fi;
 
     if [ "$PHP_BUILD_ZTS_ENABLE" == "on" ]; then
         configure_option "--enable-maintainer-zts"
@@ -636,26 +661,6 @@ function configure_package() {
         configure_option -R "--with-openssl" "$(brew --prefix openssl)"
         configure_option -R "--with-libxml-dir" "$(brew --prefix libxml2)"
     fi
-
-    if is_osx && [ "$(osx_major)" -eq 10 ] && [ "$(osx_minor)" -ge 14 ] && [ -n "$brewLocation" ] && [ -e "$(brew --prefix zlib)" ]; then
-      configure_option -R "--with-zlib-dir" "$(brew --prefix zlib)"
-    fi;
-
-    if is_osx && [ "$(osx_major)" -eq 10 ] && [ "$(osx_minor)" -ge 14 ] && [ -n "$brewLocation" ] && [ -e "$(brew --prefix bzip2)" ]; then
-      configure_option -R "--with-bz2" "$(brew --prefix bzip2)"
-    fi;
-
-    if is_osx && [ "$(osx_major)" -eq 10 ] && [ "$(osx_minor)" -ge 14 ] && [ -n "$brewLocation" ] && [ -e "$(brew --prefix libiconv)" ]; then
-      configure_option -R "--with-iconv" "$(brew --prefix libiconv)"
-    fi;
-
-    if is_osx && [ "$(osx_major)" -eq 10 ] && [ "$(osx_minor)" -ge 14 ] && [ -n "$brewLocation" ] && [ -e "$(brew --prefix libedit)" ]; then
-      configure_option -R "--with-libedit" "$(brew --prefix libedit)"
-    fi;
-
-    if is_osx && [ "$(osx_major)" -eq 10 ] && [ "$(osx_minor)" -ge 14 ] && [ -n "$brewLocation" ] && [ -e "$(brew --prefix libzip)" ]; then
-      configure_option -R "--with-libzip" "$(brew --prefix libzip)"
-    fi;
 
     if is_osx && [ -n "$brewLocation" ] && [ -e "$(brew --prefix icu4c)" ]; then
         configure_option "--with-icu-dir" "$(brew --prefix icu4c)"
