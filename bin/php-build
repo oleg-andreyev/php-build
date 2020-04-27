@@ -63,10 +63,15 @@ function realpath() {
 
 # Uses uname to check if php-build is run on OSX. This is used later on to
 # enable specifc fixes for OSX oddnesses in library file placement.
-function is_osx {
-    local uname=$(uname)
+operating_system=$(uname)
+osx_version_string="";
 
-    if [ "$uname" = "Darwin" ]; then
+if is_osx; then
+  osx_version_string=$(sw_vers -productVersion)
+fi;
+
+function is_osx {
+    if [ "$operating_system" = "Darwin" ]; then
         return 0
     else
         return 1
@@ -75,8 +80,7 @@ function is_osx {
 
 function osx_major {
     if is_osx ; then
-        local osxVersionString=$(sw_vers -productVersion)
-        local osx_major=${osxVersionString%%.*}
+        local osx_major=${osx_version_string%%.*}
         echo $osx_major
     fi
     return 0
@@ -84,8 +88,7 @@ function osx_major {
 
 function osx_minor {
     if is_osx ; then
-        local osxVersionString=$(sw_vers -productVersion)
-        local tmp=${osxVersionString#*.}
+        local tmp=${osx_version_string#*.}
         local osx_minor=${tmp%%.*}
         echo $osx_minor
     fi
@@ -282,7 +285,7 @@ function extract_bz2() {
 # List all defintions found in $PHP_BUILD_DEFINITION_PATH
 function list_definitions() {
     local sed_regex_switch='E'
-   
+
     # sed switch -E is BSD specific and only added to UNIX sed after v4.2
     # fallback to -r if -E does not work
     if ! sed -${sed_regex_switch} '' /dev/null > /dev/null 2>&1; then
@@ -349,7 +352,23 @@ function load_plugins() {
     done
 }
 
-function dynamic_patch() {
+function before_patch() {
+    export PHP_BUILD_ROOT
+    export PREFIX
+    export SOURCE_PATH="$1"
+
+    local triggers_dir="$PHP_BUILD_ROOT/share/php-build/before-patch.d/"
+    local triggers=$(ls "$triggers_dir")
+
+    if [ -n "$triggers" ]; then
+        for trigger in "$triggers_dir"*; do
+            log "Info" "Before Patch: $(basename $trigger)"
+            source "$trigger"
+        done
+    fi
+}
+
+function after_patch() {
     export PHP_BUILD_ROOT
     export PREFIX
     export SOURCE_PATH="$1"
@@ -359,7 +378,7 @@ function dynamic_patch() {
 
     if [ -n "$triggers" ]; then
         for trigger in "$triggers_dir"*; do
-            log "Info" "Applying patches: $(basename $trigger)"
+            log "Info" "After Patch: $(basename $trigger)"
             source "$trigger"
         done
     fi
@@ -377,9 +396,11 @@ function build_package() {
         mkdir -p "$PREFIX"
     fi
 
+    before_patch "$source_path" 2>&4
+
     apply_patches "$source_path" 2>&4
 
-    dynamic_patch "$source_path" 2>&4
+    after_patch "$source_path" 2>&4
 
     configure_package "$source_path"
 
@@ -456,7 +477,7 @@ function apply_patches() {
     if [ -n "$PATCH_FILES" ]; then
         log "Info" "Applying patches: $PATCH_FILES"
         for patch in $PATCH_FILES; do
-            patch -d "$source_path" -N -p1 -s < $patch || true
+            patch -d "$source_path" -N -p1 --verbose < $patch || (>&2 echo "Failed to apply patch" && exit 1)
         done
     fi
 }
@@ -605,6 +626,12 @@ function with_apxs2() {
     configure_option "--with-apxs2" "$apxs"
 }
 
+# Get entire configuration string
+function get_configure_option() {
+  local configure="$CONFIGURE_OPTIONS $PHP_BUILD_CONFIGURE_OPTS $CONFIGURE_OPTS"
+  echo "$configure"
+}
+
 # Configure Stage
 # ---------------
 
@@ -615,7 +642,7 @@ function configure_package() {
     local source_path=$1
     local backup_pwd=$(pwd)
     local package_name="$(definition_package_name)"
-    local brewLocation=$(which brew)
+    local brew_location=$(command -v brew)
 
     CONFIGURE_OUTPUT='5'
     if [ "$VERBOSE" ]; then
@@ -632,62 +659,113 @@ function configure_package() {
         fi
     } 1>&$CONFIGURE_OUTPUT
 
-    # Mac OSX stores some libraries (for example `libpng`)
-    # in `/usr/X11/lib` instead of `/usr/lib`.
-    #
-    # This currently builds PHP without the `gettext` and `readline`
-    # extensions, as I've currently not got them to work on my machine.
-    if is_osx; then
-        configure_option -D "--with-gettext"
-        configure_option -D "--with-readline"
-        # this will work for MacOS < 11.13 (macOS Sierra) when libedit wasn't bundled with MacOS SDK
-        configure_option "--with-libedit"
-        configure_option -R "--with-png-dir" "/usr/X11"
-    fi
-
-    if is_osx; then
-        # find sdk path
-        sdkpath=$(xcrun --show-sdk-path)
-
-        # if keg-only package
-        if [[ $(brew info libedit | grep -q keg-only) -eq 0 ]]; then
-          configure_option -R "--with-libedit" "${sdkpath}/usr/"
-        fi;
-
-        if [[ $(brew info libiconv | grep -q keg-only) -eq 0 ]]; then
-          configure_option -R "--with-iconv" "${sdkpath}/usr/"
-        fi;
-
-        if [[ $(brew info bzip2 | grep -q keg-only) -eq 0 ]]; then
-          configure_option -R "--with-bz2" "${sdkpath}/usr/"
-        fi;
-
-        if [[ $(brew info zlib | grep -q keg-only) -eq 0 ]]; then
-          configure_option -R "--with-zlib-dir" "${sdkpath}/usr/"
-        fi;
-    fi;
-
     if [ "$PHP_BUILD_ZTS_ENABLE" == "on" ]; then
         configure_option "--enable-maintainer-zts"
         log "Warning" "Enabling Zend Thread Safety is meant only for maintainers!"
     fi
 
-    # Override `--with-openssl` and `--with-libxml-dir`
-    # if Homebrew's openssl and libxml2 exist on Mac OS X 10.11+.
-    if is_osx && [ "$(osx_major)" -eq 10 ] && [ "$(osx_minor)" -ge 11 ] && [ -n "$brewLocation" ] && [ -e "$(brew --prefix openssl)" ] && [ -e "$(brew --prefix libxml2)" ]; then
-        configure_option -R "--with-openssl" "$(brew --prefix openssl)"
-        configure_option -R "--with-libxml-dir" "$(brew --prefix libxml2)"
+    sdkpath=""
+    if is_osx; then
+      sdkpath=$(xcrun --show-sdk-path)
+    fi;
+
+    # we cannot we bundled openssl from OSX it's missing headers e.g.: evp.h
+    if is_osx && [[ $(get_configure_option) =~ "--with-openssl" ]]; then
+      if [[ -z "$brew_location" ]]; then
+        log Error "Brew is required for openssl"
+        exit 1
+      fi;
+
+      openssl_prefix="$(brew --prefix openssl)"
+      if [[ ! -d "$openssl_prefix" ]]; then
+        log Error "Missing openssl dependency, please install it"
+        exit 1
+      fi;
+
+      configure_option -R "--with-openssl" "$openssl_prefix"
     fi
 
-    if is_osx && [ -n "$brewLocation" ] && [ -e "$(brew --prefix icu4c)" ]; then
-        configure_option "--with-icu-dir" "$(brew --prefix icu4c)"
-        # icu4c 59+ requires C++11
-        if [[ -z "$CXXFLAGS" && $($(brew --prefix icu4c)/bin/icu-config --version) > "61" ]]; then
-            # icu4c 61+ compatability (see #499)
-            export CXXFLAGS="-std=c++11 -stdlib=libc++ -DU_USING_ICU_NAMESPACE=1"
-        elif [[ -z "$CXXFLAGS" && $($(brew --prefix icu4c)/bin/icu-config --version) > "59" ]]; then
-            export CXXFLAGS="-std=c++11 -stdlib=libc++"
-        fi
+    if is_osx && [[ $(get_configure_option) =~ "--with-libxml-dir" ]]; then
+        configure_option -R "--with-libxml-dir" "${sdkpath}/usr"
+    fi
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-zlib-dir" ]]; then
+      configure_option -R "--with-zlib-dir" "${sdkpath}/usr"
+    fi;
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-bz2" ]]; then
+      configure_option -R "--with-bz2" "${sdkpath}/usr"
+    fi;
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-curl" ]]; then
+      configure_option -R "--with-curl" "${sdkpath}/usr"
+    fi;
+
+    # default --with=iconv=yes
+    if is_osx; then
+      configure_option -R "--with-iconv" "${sdkpath}/usr"
+    fi;
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-libzip" ]]; then
+      if [[ -z "$brew_location" ]]; then
+        log Error "Brew is required for libzip"
+        exit 1
+      fi;
+
+      libzip_prefix=$(brew --prefix libzip);
+      if [[ ! -d "$libzip_prefix" ]]; then
+        log Error "Missing openssl dependency, please install it"
+        exit 1
+      fi;
+
+      configure_option -R "--with-libzip" "${libzip_prefix}/usr"
+    fi;
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-tidy" ]]; then
+      configure_option -R "--with-tidy" "${sdkpath}/usr"
+    fi;
+
+    # replace readline with libedit
+    if is_osx && [[ $(get_configure_option) =~ "--with-readline" ]]; then
+      configure_option -D "--with-readline"
+      configure_option -R "--with-libedit"
+    fi;
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-libedit" ]]; then
+      configure_option -R "--with-libedit" "${sdkpath}/usr"
+    fi;
+
+    if is_osx; then
+      icu4c_prefix=""
+      if [[ ! $(get_configure_option) =~ "--with-icu-dir" ]]; then
+        if ! command -v icu-config; then
+          if [[ -z "$brew_location" ]]; then
+            log Error "Brew is required for icu4c"
+            exit 1
+          fi;
+
+          if [[ ! -d $(brew --prefix icu4c) ]]; then
+            echo "icu4c is required for building PHP on OSX"
+            log "Error" "icu4c is required for building PHP on OSX"
+            exit 1
+          fi;
+        fi;
+
+        icu4c_prefix=$(brew --prefix icu4c)
+        export PATH="${icu4c_prefix}/bin:${icu4c_prefix}/sbin:$PATH"
+      fi;
+
+      configure_option "--with-icu-dir" "$icu4c_prefix"
+      icu_config="${icu4c_prefix}/bin/icu-config"
+      icu_version=$(${icu_config} --version | cut -f1 -d'.')
+
+      # icu4c 59+ requires C++11
+      if [[ -z "$CXXFLAGS" && $icu_version -gt "61" ]]; then
+          # icu4c 61+ comparability (see #499)
+          export CXXFLAGS="-std=c++11 -stdlib=libc++ -DU_USING_ICU_NAMESPACE=1"
+      elif [[ -z "$CXXFLAGS" && $icu_version -gt "59" ]]; then
+          export CXXFLAGS="-std=c++11 -stdlib=libc++"
+      fi
     fi
 
     CONFIGURE_OPTIONS="$CONFIGURE_OPTIONS $PHP_BUILD_CONFIGURE_OPTS $CONFIGURE_OPTS"
@@ -715,11 +793,10 @@ $CONFIGURE_OPTIONS"
     # Set the lib dir to `lib64` on **x86_64**
     # systems.
     local append_default_libdir='yes'
-    for option in $CONFIGURE_OPTIONS; do
-      case "$option" in
-        "--with-libdir"*) append_default_libdir='no' ;;
-      esac
-    done
+    if [[ "$CONFIGURE_OPTIONS" =~ "--with-libdir" ]]; then
+      append_default_libdir='no'
+    fi;
+
     if [ "$(uname -p)" = "x86_64" ] && [ "${append_default_libdir}" = 'yes' ]; then
         argv="$argv --with-libdir=lib64"
     fi
