@@ -154,8 +154,6 @@ before_install:
     fi
   - |
     if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then
-        export PHP_BUILD_DEBUG=1
-
         if [[ "$DEFINITION" =~ ^("7.".*)$ ]]; then
             brew install bison@2.7
             brew link bison@2.7 --force

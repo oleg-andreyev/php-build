@@ -477,7 +477,7 @@ function apply_patches() {
     if [ -n "$PATCH_FILES" ]; then
         log "Info" "Applying patches: $PATCH_FILES"
         for patch in $PATCH_FILES; do
-            patch -d "$source_path" -N -p1 --verbose < $patch || (>&2 echo "Failed to apply patch" && exit 1)
+            patch -d "$source_path" -N -p1 --verbose -u < $patch || (>&2 echo "Failed to apply patch" && exit 1)
         done
     fi
 }
