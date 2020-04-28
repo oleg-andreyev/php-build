@@ -237,7 +237,9 @@ function download() {
     fi
 
     if [[ -d "$PHP_BUILD_TMPDIR/source/$DEFINITION" && -n "$(ls -A $PHP_BUILD_TMPDIR/source/$DEFINITION)" ]]; then
-        log "Skipping" "Already downloaded and extracted $url"
+        log "Skipping" "Already downloaded $url"
+        # extract once again to ensure that patches will apply
+        "extract_$archive_type" "$package_file" "$PHP_BUILD_TMPDIR/source/$DEFINITION"
         return
     fi
 
@@ -352,38 +354,6 @@ function load_plugins() {
     done
 }
 
-function before_patch() {
-    export PHP_BUILD_ROOT
-    export PREFIX
-    export SOURCE_PATH="$1"
-
-    local triggers_dir="$PHP_BUILD_ROOT/share/php-build/before-patch.d/"
-    local triggers=$(ls "$triggers_dir")
-
-    if [ -n "$triggers" ]; then
-        for trigger in "$triggers_dir"*; do
-            log "Info" "Before Patch: $(basename $trigger)"
-            source "$trigger"
-        done
-    fi
-}
-
-function after_patch() {
-    export PHP_BUILD_ROOT
-    export PREFIX
-    export SOURCE_PATH="$1"
-
-    local triggers_dir="$PHP_BUILD_ROOT/share/php-build/after-patch.d/"
-    local triggers=$(ls "$triggers_dir")
-
-    if [ -n "$triggers" ]; then
-        for trigger in "$triggers_dir"*; do
-            log "Info" "After Patch: $(basename $trigger)"
-            source "$trigger"
-        done
-    fi
-}
-
 function build_package() {
     local source_path=$1
     local cwd="$(pwd)"
@@ -396,11 +366,9 @@ function build_package() {
         mkdir -p "$PREFIX"
     fi
 
-    before_patch "$source_path" 2>&4
+    platform_patches "$source_path" 2>&4
 
     apply_patches "$source_path" 2>&4
-
-    after_patch "$source_path" 2>&4
 
     configure_package "$source_path"
 
@@ -470,14 +438,26 @@ function build_package() {
     fi
 }
 
+# Collect platform patches
+function platform_patches() {
+    local patches_dir="$PHP_BUILD_ROOT/share/php-build/patches"
+    local patches=$(ls $patches_dir)
+
+    for patch in $patches; do
+        if [[ $(echo "$patch" | grep -e "^$operating_system") ]]; then
+            patch_file "$patch"
+        fi;
+    done
+}
+
 # Apply patch files
 function apply_patches() {
     local source_path=$1
 
     if [ -n "$PATCH_FILES" ]; then
-        log "Info" "Applying patches: $PATCH_FILES"
         for patch in $PATCH_FILES; do
-            patch -d "$source_path" -N -p1 --verbose -u < $patch || (>&2 echo "Failed to apply patch" && exit 1)
+            log "Info" "Applying patches: $patch"
+            out=$(patch -d $source_path -N -p1 --verbose -u < $patch) || (>2 echo $out && exit 1)
         done
     fi
 }
@@ -669,7 +649,7 @@ function configure_package() {
       sdkpath=$(xcrun --show-sdk-path)
     fi;
 
-    # we cannot we bundled openssl from OSX it's missing headers e.g.: evp.h
+    # we cannot use bundled openssl from OSX it's missing headers e.g.: evp.h
     if is_osx && [[ $(get_configure_option) =~ "--with-openssl" ]]; then
       if [[ -z "$brew_location" ]]; then
         log Warning "Brew is missing, cannot determine openssl location, set --with-openssl=<dir> in CONFIGURE_OPTS variable"
@@ -704,12 +684,18 @@ function configure_package() {
       if [[ -z "$brew_location" ]]; then
         log Warning "Brew is missing, cannot determine openssl location, set --with-iconv=<dir> in CONFIGURE_OPTS variable"
       else
-        libiconv_prefix="$(brew --prefix libiconv)"
+        if [[ $(osx_major) -eq 10 ]] && [[ $(osx_minor) -ge 15 ]]; then
+          libiconv_prefix="${sdkpath}/usr"
+        else
+          libiconv_prefix="$(brew --prefix libiconv)"
+        fi;
+
         if [[ ! -d "$libiconv_prefix" ]]; then
           log Error "Missing libiconv dependency, please install it"
           exit 1
         fi;
-        configure_option -R "--with-iconv" "$libiconv_prefix"
+
+        configure_option -R "--with-iconv" "${libiconv_prefix}"
       fi;
     fi;
 
@@ -727,10 +713,21 @@ function configure_package() {
     fi;
 
     if is_osx && [[ $(get_configure_option) =~ "--with-tidy" ]]; then
-      configure_option -R "--with-tidy" "${sdkpath}/usr"
+      if [[ -z "$brew_location" ]]; then
+        log Warning "Brew is missing, cannot determine openssl location, set --with-tidy=<dir> in CONFIGURE_OPTS variable"
+      else
+        tidy_prefix="$(brew --prefix tidy-html5)"
+        if [[ ! -d "$tidy_prefix" ]]; then
+          log Error "Missing tidy-html5 dependency, please install it"
+          exit 1
+        fi;
+        configure_option -R "--with-tidy" "$tidy_prefix"
+      fi;
     fi;
 
     # replace readline with libedit
+    # checking for rl_pending_input in -lreadline... no
+    # configure: error: invalid readline installation detected. Try --with-libedit instead.'
     if is_osx && [[ $(get_configure_option) =~ "--with-readline" ]]; then
       configure_option -D "--with-readline"
       configure_option -R "--with-libedit"
@@ -826,21 +823,19 @@ $CONFIGURE_OPTIONS"
 }
 
 function buildconf_wrapper() {
-    local buildconf_log_path="$(mktemp "${PHP_BUILD_TMPDIR}/buildconf_XXXXXX.log")"
     local result
 
     set +e
-    ./buildconf "$@" >$buildconf_log_path
+    out=$(./buildconf "$@" 2>&1)
     result=$?
     set -e
 
     if [ $result -eq 0 ]; then
-        cat $buildconf_log_path
+        echo $out
     else
         echo "Failed to run 'buildconf'." 1>&2
-        cat $buildconf_log_path 1>&2
+        cat $out 1>&2
     fi
-    rm -f $buildconf_log_path
 
     return $result
 }
