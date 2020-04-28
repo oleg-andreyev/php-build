@@ -66,10 +66,6 @@ function realpath() {
 operating_system=$(uname)
 osx_version_string="";
 
-if is_osx; then
-  osx_version_string=$(sw_vers -productVersion)
-fi;
-
 function is_osx {
     if [ "$operating_system" = "Darwin" ]; then
         return 0
@@ -77,6 +73,10 @@ function is_osx {
         return 1
     fi
 }
+
+if is_osx; then
+  osx_version_string=$(sw_vers -productVersion)
+fi;
 
 function osx_major {
     if is_osx ; then
@@ -672,17 +672,15 @@ function configure_package() {
     # we cannot we bundled openssl from OSX it's missing headers e.g.: evp.h
     if is_osx && [[ $(get_configure_option) =~ "--with-openssl" ]]; then
       if [[ -z "$brew_location" ]]; then
-        log Error "Brew is required for openssl"
-        exit 1
+        log Warning "Brew is missing, cannot determine openssl location, set --with-openssl=<dir> in CONFIGURE_OPTS variable"
+      else
+        openssl_prefix="$(brew --prefix openssl)"
+        if [[ ! -d "$openssl_prefix" ]]; then
+          log Error "Missing openssl dependency, please install it"
+          exit 1
+        fi;
+        configure_option -R "--with-openssl" "$openssl_prefix"
       fi;
-
-      openssl_prefix="$(brew --prefix openssl)"
-      if [[ ! -d "$openssl_prefix" ]]; then
-        log Error "Missing openssl dependency, please install it"
-        exit 1
-      fi;
-
-      configure_option -R "--with-openssl" "$openssl_prefix"
     fi
 
     if is_osx && [[ $(get_configure_option) =~ "--with-libxml-dir" ]]; then
@@ -703,22 +701,29 @@ function configure_package() {
 
     # default --with=iconv=yes
     if is_osx; then
-      configure_option -R "--with-iconv" "${sdkpath}/usr"
+      if [[ -z "$brew_location" ]]; then
+        log Warning "Brew is missing, cannot determine openssl location, set --with-iconv=<dir> in CONFIGURE_OPTS variable"
+      else
+        libiconv_prefix="$(brew --prefix libiconv)"
+        if [[ ! -d "$libiconv_prefix" ]]; then
+          log Error "Missing libiconv dependency, please install it"
+          exit 1
+        fi;
+        configure_option -R "--with-iconv" "$libiconv_prefix"
+      fi;
     fi;
 
     if is_osx && [[ $(get_configure_option) =~ "--with-libzip" ]]; then
       if [[ -z "$brew_location" ]]; then
-        log Error "Brew is required for libzip"
-        exit 1
+        log Warning "Brew is missing, cannot determine openssl location, set --with-libzip=<dir> in CONFIGURE_OPTS variable"
+      else
+        libzip_prefix="$(brew --prefix libzip)"
+        if [[ ! -d "$libzip_prefix" ]]; then
+          log Error "Missing libzip dependency, please install it"
+          exit 1
+        fi;
+        configure_option -R "--with-libzip" "$libzip_prefix"
       fi;
-
-      libzip_prefix=$(brew --prefix libzip);
-      if [[ ! -d "$libzip_prefix" ]]; then
-        log Error "Missing openssl dependency, please install it"
-        exit 1
-      fi;
-
-      configure_option -R "--with-libzip" "${libzip_prefix}/usr"
     fi;
 
     if is_osx && [[ $(get_configure_option) =~ "--with-tidy" ]]; then
@@ -737,26 +742,27 @@ function configure_package() {
 
     if is_osx; then
       icu4c_prefix=""
+      # check that use did not supply us with --with-icu-dir
       if [[ ! $(get_configure_option) =~ "--with-icu-dir" ]]; then
+        # check that icu-config exists
         if ! command -v icu-config; then
           if [[ -z "$brew_location" ]]; then
-            log Error "Brew is required for icu4c"
-            exit 1
-          fi;
-
-          if [[ ! -d $(brew --prefix icu4c) ]]; then
+            log Warning "Brew is missing, cannot determine icu4c location, set --with-icu-dir=<dir> in CONFIGURE_OPTS variable"
+          elif [[ ! -d $(brew --prefix icu4c) ]]; then
             echo "icu4c is required for building PHP on OSX"
             log "Error" "icu4c is required for building PHP on OSX"
             exit 1
+          else
+            icu_config="$(brew --prefix icu4c)/bin/icu-config"
+            icu4c_prefix=$(${icu_config} --prefix)
           fi;
+        else
+          icu_config=$(command -v icu-config);
+          icu4c_prefix=$(${icu_config} --prefix)
         fi;
-
-        icu4c_prefix=$(brew --prefix icu4c)
-        export PATH="${icu4c_prefix}/bin:${icu4c_prefix}/sbin:$PATH"
       fi;
 
       configure_option "--with-icu-dir" "$icu4c_prefix"
-      icu_config="${icu4c_prefix}/bin/icu-config"
       icu_version=$(${icu_config} --version | cut -f1 -d'.')
 
       # icu4c 59+ requires C++11
