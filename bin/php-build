@@ -236,12 +236,12 @@ function download() {
         rm -rf "$PHP_BUILD_TMPDIR/source/$DEFINITION"
     fi
 
-    if [[ -d "$PHP_BUILD_TMPDIR/source/$DEFINITION" && -n "$(ls -A $PHP_BUILD_TMPDIR/source/$DEFINITION)" ]]; then
-        log "Skipping" "Already downloaded $url"
-        # extract once again to ensure that patches will apply
-        "extract_$archive_type" "$package_file" "$PHP_BUILD_TMPDIR/source/$DEFINITION"
-        return
-    fi
+#    if [[ -d "$PHP_BUILD_TMPDIR/source/$DEFINITION" && -n "$(ls -A $PHP_BUILD_TMPDIR/source/$DEFINITION)" ]]; then
+#        log "Skipping" "Already downloaded $url"
+#        # extract once again to ensure that patches will apply
+#        "extract_$archive_type" "$package_file" "$PHP_BUILD_TMPDIR/source/$DEFINITION"
+#        return
+#    fi
 
     log "Downloading" "$url"
 
@@ -354,6 +354,27 @@ function load_plugins() {
     done
 }
 
+function check_dependency() {
+  local brew_location=$(command -v brew)
+  local autoconf=$(command -v autoconf)
+  local autoconf_version=$($autoconf --version | head -n1 | sed -e 's/^[^0-9]*//' -e 's/[a-z]* *$//')
+  IFS='.'; read -r -a version <<< "$autoconf_version"; IFS=' '
+
+  if [[ $DEFINITION =~ 5.3.* ]]; then
+    if is_osx && [[ -n $brew_location ]]; then
+      local autoconf213=$(brew --prefix autoconf@2.13)
+      if [[ ! -d $autoconf213 ]]; then
+        log Error "You need autoconf 2.59 or lower to build this version of PHP. You are currently trying to use ${autoconf_version}. Use this command to install it 'brew install autoconf@2.13'";
+        exit 1
+      fi;
+      export PHP_AUTOCONF="${autoconf213}/bin/autoconf213"
+    elif [[ "${version[0]}${version[1]}" -gt 259 ]]; then
+      log Error "You need autoconf 2.59 or lower to build this version of PHP. You are currently trying to use ${autoconf_version}";
+      exit 1;
+    fi;
+  fi;
+}
+
 function build_package() {
     local source_path=$1
     local cwd="$(pwd)"
@@ -365,8 +386,6 @@ function build_package() {
     if [ ! -d "$PREFIX" ]; then
         mkdir -p "$PREFIX"
     fi
-
-    platform_patches "$source_path" 2>&4
 
     apply_patches "$source_path" 2>&4
 
@@ -440,12 +459,22 @@ function build_package() {
 
 # Collect platform patches
 function platform_patches() {
-    local patches_dir="$PHP_BUILD_ROOT/share/php-build/patches"
-    local patches=$(ls $patches_dir)
+    local patches_dir="$PHP_BUILD_ROOT/share/php-build/patches/*"
 
-    for patch in $patches; do
-        if [[ $(echo "$patch" | grep -e "^$operating_system") ]]; then
+    for patch in $patches_dir; do
+        if [[ $patch =~ $operating_system-php-$PHP_VERSION_MAJOR.$PHP_VERSION_MINOR.$PHP_VERSION_PATCH- ]]; then
             patch_file "$patch"
+            continue
+        fi;
+
+        if [[ $patch =~ $operating_system-php-$PHP_VERSION_MAJOR.$PHP_VERSION_MINOR- ]]; then
+            patch_file "$patch"
+            continue
+        fi;
+
+        if [[ $patch =~ $operating_system-php-$PHP_VERSION_MAJOR- ]]; then
+            patch_file "$patch"
+            continue
         fi;
     done
 }
@@ -492,6 +521,9 @@ function install_package() {
     local archive_type=$2
 
     {
+        check_dependency
+        platform_patches "$source_path" 2>&4
+
         download $url $archive_type
         cd "$PHP_BUILD_TMPDIR/source/$DEFINITION"
         build_package
@@ -649,16 +681,88 @@ function configure_package() {
       sdkpath=$(xcrun --show-sdk-path)
     fi;
 
+    if is_osx && [[ "${PHP_VERSION_MAJOR}${PHP_VERSION_MINOR}" -eq 54 && $(get_configure_option) =~ "--with-gd" ]]; then
+      if [[ -z "$brew_location" ]]; then
+        log Warning "Brew is missing, cannot determine openssl location, set --with-openssl=<dir> in CONFIGURE_OPTS variable"
+      else
+        # php 5.4 uses 2.0.3.1
+        # 2.21
+        # https://raw.githubusercontent.com/Homebrew/homebrew-core/ec59788a8c1006a26190bae399a4f60e6f2edffa/Formula/gd.rb
+
+        # forcing external gd
+        gdlib_prefix="$(brew --prefix gd)"
+        gdlib_version=$(pkg-config --modversion gdlib)
+        IFS='.'; read -r -a version <<< "$gdlib_version"; IFS=' '
+
+        if [[ "${PHP_VERSION_MAJOR}${PHP_VERSION_MINOR}" -lt 70 && "${version[0]}${version[1]}" -gt 21 ]]; then
+          log Warning "This version of PHP requires GDLib 2.1.x or lower. You need to install it manually"
+
+          log Info "Commands:"
+          log Info "- cd /tmp/"
+          log Info "- wget https://github.com/libgd/libgd/releases/download/gd-2.1.0/libgd-2.1.0.tar.xz"
+          log Info "- tar xvf libgd-2.1.0.tar.xz"
+          log Info "- cd libgd-2.1.0"
+          log Info "- mkdir -p /usr/local/opt/gd@2.1"
+          log Info "- ./configure --build=x86_64-apple-darwin --prefix=/usr/local/opt/gd@2.1"
+          log Info "- make"
+          log Info "- make install"
+
+          gdlib_prefix="/usr/local/opt/gd@2.1"
+
+          export LDFLAGS="${LDFLAGS} -L${gdlib_prefix}/lib"
+          export CPPFLAGS="${CPPFLAGS} -I${gdlib_prefix}/include"
+          export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH}:${gdlib_prefix}"
+          export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}:${gdlib_prefix}/lib/pkgconfig"
+        fi;
+
+        if [[ ! -d "$gdlib_prefix" ]]; then
+          log Error "Missing gdlib dependency, please install it"
+          exit 1
+        fi;
+
+        configure_option -R "--with-gd" "$gdlib_prefix"
+      fi
+    fi;
+
+    if is_osx && [[ "${PHP_VERSION_MAJOR}${PHP_VERSION_MINOR}" -eq 54 ]]; then
+      export EXTRA_LIBS="-lresolv"
+    fi;
+
     # we cannot use bundled openssl from OSX it's missing headers e.g.: evp.h
     if is_osx && [[ $(get_configure_option) =~ "--with-openssl" ]]; then
       if [[ -z "$brew_location" ]]; then
         log Warning "Brew is missing, cannot determine openssl location, set --with-openssl=<dir> in CONFIGURE_OPTS variable"
       else
         openssl_prefix="$(brew --prefix openssl)"
+        openssl_version=$(${openssl_prefix}/bin/openssl version | cut -d' ' -f2)
+        IFS='.'; read -r -a version <<< "$openssl_version"; IFS=' '
+
+        if [[ "${PHP_VERSION_MAJOR}${PHP_VERSION_MINOR}" -lt 70 && "${version[0]}${version[1]}${version[2]}" != "102k" ]]; then
+          log Warning "This version of PHP requires OpenSSL 1.0.2k. You need to install it manually"
+
+          # see https://github.com/liip/build-entropy-php/blob/7156216bccdd125bc7df6fdf18cdcfc68637dcc8/lib/Package/openssl.pm
+          log Info "Commands:"
+          log Info "- cd /tmp/"
+          log Info "- wget https://www.openssl.org/source/openssl-1.0.2k.tar.gz"
+          log Info "- tar xvf openssl-1.0.2k.tar.gz"
+          log Info "- cd openssl-1.0.2k"
+          log Info "- mkdir -p /usr/local/opt/openssl@1.0.2k"
+          log Info "- ./Configure darwin64-x86_64-cc --prefix=/usr/local/opt/openssl@1.0.2k"
+          log Info "- make"
+          log Info "- make install"
+
+          openssl_prefix="/usr/local/opt/openssl@1.0.2k"
+
+          export LDFLAGS="${LDFLAGS} -L${openssl_prefix}/lib"
+          export CPPFLAGS="${CPPFLAGS} -I${openssl_prefix}/include"
+          export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}:${openssl_prefix}/lib/pkgconfig"
+        fi;
+
         if [[ ! -d "$openssl_prefix" ]]; then
           log Error "Missing openssl dependency, please install it"
           exit 1
         fi;
+
         configure_option -R "--with-openssl" "$openssl_prefix"
       fi;
     fi
@@ -682,7 +786,7 @@ function configure_package() {
     # default --with=iconv=yes
     if is_osx; then
       if [[ -z "$brew_location" ]]; then
-        log Warning "Brew is missing, cannot determine openssl location, set --with-iconv=<dir> in CONFIGURE_OPTS variable"
+        log Warning "Brew is missing, cannot determine libiconv location, set --with-iconv=<dir> in CONFIGURE_OPTS variable"
       else
         if [[ $(osx_major) -eq 10 ]] && [[ $(osx_minor) -ge 15 ]]; then
           libiconv_prefix="${sdkpath}/usr"
@@ -696,6 +800,19 @@ function configure_package() {
         fi;
 
         configure_option -R "--with-iconv" "${libiconv_prefix}"
+      fi;
+    fi;
+
+    if is_osx && [[ $(get_configure_option) =~ "--with-mcrypt" && $DEFINITION =~ 7.1.* ]]; then
+      if [[ -z "$brew_location" ]]; then
+        log Warning "Brew is missing, cannot determine mcrypt location, set --with-mcrypt=<dir> in CONFIGURE_OPTS variable"
+      else
+        lmcrypt_prefix="$(brew --prefix mcrypt)"
+        if [[ ! -d "$lmcrypt_prefix" ]]; then
+          log Error "Missing mcrypt dependency, please install it"
+          exit 1
+        fi;
+        configure_option -R "--with-mcrypt" "$lmcrypt_prefix"
       fi;
     fi;
 
@@ -717,6 +834,27 @@ function configure_package() {
         log Warning "Brew is missing, cannot determine openssl location, set --with-tidy=<dir> in CONFIGURE_OPTS variable"
       else
         tidy_prefix="$(brew --prefix tidy-html5)"
+        tidy_version=$(${tidy_prefix}/bin/tidy --version | sed -e 's/^[^0-9]*//' -e 's/[a-z]* *$//')
+        IFS='.'; read -r -a version <<< "$tidy_version"; IFS=' '
+
+        if [[ "${PHP_VERSION_MAJOR}${PHP_VERSION_MINOR}" -lt 70 && "${version[0]}${version[1]}" -gt 49 ]]; then
+          log Warning "This version of PHP requires tidy-html 4.9.x or lower. You need to install it manually"
+
+          log Info "Commands:"
+          log Info "- cd /tmp/"
+          # daef0371563dea562ad09b6dcf060dd457bf275e 4.9.37
+          log Info "- wget https://github.com/htacg/tidy-html5/archive/daef0371563dea562ad09b6dcf060dd457bf275e.tar.gz"
+          log Info "- tar xvf daef0371563dea562ad09b6dcf060dd457bf275e.tar.gz"
+          log Info "- cd tidy-html5-daef0371563dea562ad09b6dcf060dd457bf275e"
+          log Info "- cd build/cmake"
+          log Info "- mkdir -p /usr/local/opt/tidy-html5@4.9"
+          log Info "- cmake ../..  -DCMAKE_INSTALL_PREFIX=/usr/local/opt/tidy-html5@4.9 -DCMAKE_BUILD_TYPE=Release"
+          log Info "- make"
+          log Info "- make install"
+
+          tidy_prefix="/usr/local/opt/tidy-html5@4.9"
+        fi;
+
         if [[ ! -d "$tidy_prefix" ]]; then
           log Error "Missing tidy-html5 dependency, please install it"
           exit 1
@@ -745,13 +883,25 @@ function configure_package() {
         if ! command -v icu-config; then
           if [[ -z "$brew_location" ]]; then
             log Warning "Brew is missing, cannot determine icu4c location, set --with-icu-dir=<dir> in CONFIGURE_OPTS variable"
-          elif [[ ! -d $(brew --prefix icu4c) ]]; then
-            echo "icu4c is required for building PHP on OSX"
-            log "Error" "icu4c is required for building PHP on OSX"
-            exit 1
           else
-            icu_config="$(brew --prefix icu4c)/bin/icu-config"
-            icu4c_prefix=$(${icu_config} --prefix)
+            icu4c_prefix="$(brew --prefix icu4c)"
+            icu4c_version=$(${icu4c_prefix}/bin/icu-config --version)
+            IFS='.'; read -r -a version <<< "$icu4c_version"; IFS=' '
+
+            if [[ "${PHP_VERSION_MAJOR}${PHP_VERSION_MINOR}" -eq 54 && "${version[0]}${version[1]}" -gt 552 ]]; then
+              log Info "Commands:"
+              log Info "- cd /tmp/"
+              log Info "- wget https://github.com/unicode-org/icu/releases/download/release-55-2/icu4c-55_2-src.tgz"
+              log Info "- tar xvf icu4c-55_2-src.tgz"
+              log Info "- cd icu/source"
+              log Info "- wget https://patch-diff.githubusercontent.com/raw/unicode-org/icu/pull/579.diff"
+              log Info "- patch -p3 -N < 579.diff"
+              log Info "- ./configure --with-library-bits=64 --prefix=/usr/local/opt/icu4c@55.2"
+              log Info "- make"
+              log Info "- make install"
+
+              icu4c_prefix="/usr/local/opt/icu4c@55.2"
+            fi;
           fi;
         else
           icu_config=$(command -v icu-config);
@@ -759,8 +909,17 @@ function configure_package() {
         fi;
       fi;
 
+      if [[ ! -d "$icu4c_prefix" ]]; then
+        log Error "Missing icu4c dependency, please install it"
+        exit 1
+      fi;
+
+      export LDFLAGS="${LDFLAGS} -L${icu4c_prefix}/lib"
+      export CPPFLAGS="${CPPFLAGS} -I${icu4c_prefix}/include"
+      export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}:${icu4c_prefix}/lib/pkgconfig"
+
       configure_option "--with-icu-dir" "$icu4c_prefix"
-      icu_version=$(${icu_config} --version | cut -f1 -d'.')
+      icu_version=$(${icu4c_prefix}/bin/icu-config --version | cut -f1 -d'.')
 
       # icu4c 59+ requires C++11
       if [[ -z "$CXXFLAGS" && $icu_version -gt "61" ]]; then
@@ -773,15 +932,19 @@ function configure_package() {
 
     CONFIGURE_OPTIONS="$CONFIGURE_OPTIONS $PHP_BUILD_CONFIGURE_OPTS $CONFIGURE_OPTS"
 
+    # replacing new lines
+    # it's failing build of 5.3.29 on MacOS
+    CONFIGURE_OPTIONS=$(echo "$CONFIGURE_OPTIONS" | tr '\n' ' ')
+
     # Add the config-file-path, config-file-scan-dir aswell as the
     # prefix to the build options, these cannot be changed by definitions.
-    local argv="--with-config-file-path="$PREFIX/etc" \
---with-config-file-scan-dir="$PREFIX/etc/conf.d" \
---prefix=$PREFIX \
---libexecdir=$PREFIX/libexec \
---datadir=$PREFIX/share/php \
---mandir=$PREFIX/share/man \
-$CONFIGURE_OPTIONS"
+    local argv="--with-config-file-path=${PREFIX}/etc"
+    argv="${argv} --with-config-file-scan-dir=${PREFIX}/etc/conf.d"
+    argv="${argv} --prefix=${PREFIX}"
+    argv="${argv} --libexecdir=${PREFIX}/libexec"
+    argv="${argv} --datadir=${PREFIX}/share/php"
+    argv="${argv} --mandir=${PREFIX}/share/man"
+    argv="${argv} ${CONFIGURE_OPTIONS}"
 
     log "Preparing" "$source_path"
 
@@ -810,6 +973,10 @@ $CONFIGURE_OPTIONS"
     if is_osx; then
         export ac_cv_exeext=''
     fi
+
+    if is_osx; then
+      argv="${argv} --build=x86_64-apple-darwin"
+    fi;
 
     ./configure $argv 1>&$CONFIGURE_OUTPUT
 
@@ -969,6 +1136,11 @@ DEFINITION=$1
 
 # The built PHP version is placed in this directory.
 PREFIX=$2
+
+IFS='.'; read -r -a version <<< "$DEFINITION"; IFS=' '
+PHP_VERSION_MAJOR="${version[0]}"
+PHP_VERSION_MINOR="${version[1]}"
+PHP_VERSION_PATCH="${version[2]}"
 
 if [ -z "$PREFIX" ]; then
     display_usage
